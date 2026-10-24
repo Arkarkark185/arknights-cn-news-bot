@@ -77,27 +77,109 @@ def get_json(url: str, *, params: dict | None = None, referer: str | None = None
     return data
 
 
+def news_title_from_anchor(value: str) -> str:
+    """Remove the site's teaser decorations; never treat READ MORE as news."""
+    title = clean_text(value)
+    title = re.sub(r'^(?:新闻|公告|活动)\s*\d{4}\s*//\s*\d{1,2}\s*/\s*\d{1,2}', '', title).strip()
+    title = re.sub(r'^\d{4}\s*//\s*\d{1,2}\s*/\s*\d{1,2}', '', title).strip()
+    title = re.sub(r'(?:更多情报\s*)?READ\s*MORE\s*$', '', title, flags=re.I).strip()
+    if title in ('更多情报', '查看详情', '返回', '新闻', '公告', '活动'):
+        return ''
+    if not re.search(r'[\u3400-\u9fff]', title):
+        return ''
+    return title
+
+
 def parse_official_page(raw: str) -> list[Post]:
-    """The official CN landing page currently links its three newest /news/ID posts."""
+    """Prefer a real headline when several homepage links point to one article.
+
+    On the Hypergryph homepage, the large banner's '更多情报 READ MORE'
+    and the actual article card can have exactly the same /news/ ID.
+    """
     soup = BeautifulSoup(raw, 'html.parser')
-    posts: list[Post] = []
-    seen = set()
+    posts: dict[str, Post] = {}
     for anchor in soup.find_all('a', href=True):
         url = urljoin(SITE, anchor['href'])
         if not re.fullmatch(r'https://ak\.hypergryph\.com/news/\d+', url):
             continue
-        if url in seen:
+        title = news_title_from_anchor(anchor.get_text(' ', strip=True))
+        if not title:
+            # Do not turn a 'READ MORE' button into a notification.
             continue
-        title = clean_text(anchor.get_text(' ', strip=True))
-        title = re.sub(r'^(?:新闻|公告|活动)\s*\d{4}\s*//\s*\d{1,2}\s*/\s*\d{1,2}', '', title).strip()
-        title = re.sub(r'^\d{4}\s*//\s*\d{1,2}\s*/\s*\d{1,2}', '', title).strip()
-        if not title or title.upper() in ('READ MORE', '更多情报', 'GO BACK'):
-            continue
-        seen.add(url)
-        posts.append(Post('Official site', f'site:{url.rsplit("/", 1)[-1]}', title, url))
+        item = Post('Official site', f'site:{url.rsplit("/", 1)[-1]}', title, url)
+        if url not in posts or len(title) > len(posts[url].text):
+            posts[url] = item
     if not posts:
-        raise ValueError('Official site HTML had no /news/ID links; page may have changed')
-    return posts
+        raise ValueError('Official site had no usable article headlines; HTML may have changed')
+    return list(posts.values())
+
+
+def parse_official_article(raw: str, post: Post) -> Post:
+    """Extract news-page text and images, not navigation/header boilerplate.
+
+    Select article-like containers rather than the whole document. If the site
+    layout changes, the safe fallback is the homepage headline, not page chrome.
+    """
+    soup = BeautifulSoup(raw, 'html.parser')
+    title = post.text
+    for selector in ('h1', '[class*="news-title"]', '[class*="article-title"]',
+                     'meta[property="og:title"]'):
+        node = soup.select_one(selector)
+        if node:
+            candidate = clean_text(node.get('content') if node.name == 'meta' else node.get_text(' ', strip=True))
+            if candidate and re.search(r'[\u3400-\u9fff]', candidate) and len(candidate) < 180:
+                title = candidate
+                break
+
+    # Prefer an actual article body; generic .content and main come last.
+    selectors = ('article', '.news-content', '.news-detail', '.article-content',
+                 '.article-body', '[class*="newsContent"]', '[class*="articleContent"]',
+                 '[class*="detail-content"]', '[class*="news-detail"]',
+                 'main', '.content')
+    ranked = []
+    for rank, selector in enumerate(selectors):
+        for node in soup.select(selector)[:8]:
+            fragment = BeautifulSoup(str(node), 'html.parser')
+            for rubbish in fragment.select('script, style, nav, footer, header, noscript'):
+                rubbish.decompose()
+            # Preserve paragraph boundaries and not one wall of text.
+            raw_text = fragment.get_text('\n', strip=True)
+            lines = [re.sub(r'\s+', ' ', ln).strip() for ln in raw_text.splitlines()]
+            lines = [ln for ln in lines if ln and ln not in ('返回首页', '返回列表', 'HOMEPAGE', 'GO BACK', 'INFO', 'READ MORE')]
+            body = '\n'.join(lines)
+            if title in body:
+                body = body.replace(title, '', 1).strip()
+            if len(body) < 12 or not re.search(r'[\u3400-\u9fff]', body):
+                continue
+            # A navigation-heavy page isn't a trustworthy article transcript.
+            if body.count('RHODES ISLAND') >= 2 or body.count('INFORMATION情报') >= 2:
+                continue
+            ranked.append((rank, len(body), body, node))
+    if ranked:
+        rank, _, body, node = sorted(ranked, key=lambda x: (x[0], -x[1]))[0]
+        # Keep the source article excerpt, without claiming to summarize all of a large post.
+        body = body[:1600].strip()
+        text = f'{title}\n{body}' if body else title
+        images = extract_image_urls(str(node), post.url, max_count=4)
+    else:
+        text = title
+        # Only post-specific Open Graph images; don't pick generic site banners.
+        image_meta = soup.select_one('meta[property="og:image"]')
+        images = extract_image_urls(str(image_meta), post.url, max_count=1) if image_meta else ()
+    return Post(post.source, post.id, text, post.url,
+                images[0] if images else post.image,
+                images or post.images)
+
+
+def hydrate_official(post: Post) -> Post:
+    """Article fetching happens only for posts that will be sent, not baselines."""
+    if post.source != 'Official site':
+        return post
+    try:
+        return parse_official_article(get_html(post.url), post)
+    except (requests.RequestException, ValueError, TypeError) as exc:
+        LOG.warning('Could not retrieve full official article %s: %s', post.url, exc)
+        return post
 
 
 def fetch_official() -> list[Post]:
@@ -303,7 +385,7 @@ def source_images(post: Post, *, max_count: int = 3) -> list[str]:
     for url in ([post.image] if post.image else []) + list(post.images):
         if url and url not in result:
             result.append(url)
-    if post.source in ('Official site', 'Official Weibo (Sina mirror)'):
+    if (not result or post.source == 'Official Weibo (Sina mirror)') and post.source in ('Official site', 'Official Weibo (Sina mirror)'):
         try:
             raw = get_html(post.url)
             soup = BeautifulSoup(raw, 'html.parser')
@@ -420,8 +502,8 @@ def build_embed(post: Post, english: str | None, *, preview: bool = False) -> di
             title = category_name
         body = shorten(english_clean, 1250)
     else:
-        title = category_name
-        body = 'Free automatic translation is temporarily unavailable. See the Chinese original below.'
+        title = shorten(text.split('\n', 1)[0], 92) if text else category_name
+        body = 'English translation is temporarily unavailable. Original Chinese is included below.'
     title = ('🧪 Preview • ' if preview else '') + title
     embed = {
         'author': {'name': f'Arknights CN  •  {category_name}'},
@@ -466,6 +548,8 @@ def try_download_image(url: str, *, referer: str) -> tuple[bytes, str] | None:
 
 
 def send_to_discord(webhook: str, post: Post, *, dry_run: bool = False, preview: bool = False) -> None:
+    if not dry_run:
+        post = hydrate_official(post)
     english = translated(tidy_post_text(post.text)) if not dry_run else None
     embed = build_embed(post, english, preview=preview)
     payload = {'username': 'Arknights CN News', 'allowed_mentions': {'parse': []}, 'embeds': [embed]}

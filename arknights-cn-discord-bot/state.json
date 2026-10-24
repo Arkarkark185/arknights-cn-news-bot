@@ -106,6 +106,21 @@
       "sina:5337628230551048",
       "sina:5337584207136234",
       "sina:5337582931804642"
+    ],
+    "bilibili-rss": [
+      "bili-rss:https://t.bilibili.com/1262601846132834322",
+      "bili-rss:https://t.bilibili.com/1262323532200673288",
+      "bili-rss:https://t.bilibili.com/1262308070372933640",
+      "bili-rss:https://t.bilibili.com/1262292608479133696",
+      "bili-rss:https://t.bilibili.com/1261936985144033287",
+      "bili-rss:https://t.bilibili.com/1261612285632184336",
+      "bili-rss:https://t.bilibili.com/1261565899999019014",
+      "bili-rss:https://t.bilibili.com/1261194881386151943",
+      "bili-rss:https://t.bilibili.com/1260854653422141444",
+      "bili-rss:https://t.bilibili.com/1260004249869221922",
+      "bili-rss:https://t.bilibili.com/1259695611361361956",
+      "bili-rss:https://t.bilibili.com/1259633164728401936",
+      "bili-rss:https://t.bilibili.com/1254810345912926281"
     ]
   }
 }

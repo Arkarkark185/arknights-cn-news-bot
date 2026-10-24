@@ -12,6 +12,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
+import xml.etree.ElementTree as ET
 
 import requests
 from bs4 import BeautifulSoup
@@ -198,11 +199,58 @@ def parse_bilibili_api(data: dict) -> list[Post]:
     return unique_posts(posts)
 
 
+def parse_bilibili_rss(raw: str) -> list[Post]:
+    """Read an RSSHub feed for the official Bilibili account.
+
+    This is an independently hosted, best-effort fallback, not an official API.
+    Accept links pointing to Bilibili only, and reject empty/error feeds.
+    """
+    root = ET.fromstring(raw)
+    posts = []
+    for item in root.findall('.//item'):
+        title = clean_text(item.findtext('title') or '')
+        description = item.findtext('description') or ''
+        encoded = item.findtext('{http://purl.org/rss/1.0/modules/content/}encoded') or ''
+        body = encoded or description
+        text = clean_text(title + ' | ' + body)
+        link = (item.findtext('link') or '').strip()
+        parsed = urlparse(link)
+        if parsed.scheme != 'https' or not (parsed.hostname or '').endswith(('.bilibili.com', '.b23.tv')):
+            continue
+        raw_id = (item.findtext('guid') or link).strip()
+        if not raw_id or not text:
+            continue
+        image = None
+        document = BeautifulSoup(body, 'html.parser')
+        first = document.find('img')
+        if first:
+            image = absolute_image(link, first.get('src') or first.get('data-src'))
+        # Links/IDs remain the same even if a different RSSHub instance is used.
+        posts.append(Post('Official Bilibili (RSS mirror)', f'bili-rss:{raw_id}',
+                          shorten(text, 1800), link, image))
+    if not posts:
+        raise ValueError('RSS mirror returned no usable Bilibili posts')
+    return unique_posts(posts)
+
+
 def fetch_bilibili() -> list[Post]:
-    data = get_json('https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space',
-                    params={'host_mid': BILIBILI_UID},
-                    referer=f'https://space.bilibili.com/{BILIBILI_UID}/dynamic')
-    return parse_bilibili_api(data)
+    try:
+        data = get_json('https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space',
+                        params={'host_mid': BILIBILI_UID},
+                        referer=f'https://space.bilibili.com/{BILIBILI_UID}/dynamic')
+        return parse_bilibili_api(data)
+    except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
+        LOG.warning('Bilibili direct API unavailable (%s); trying public RSS mirrors', exc)
+
+    failures = []
+    for instance in ('https://rsshub.app', 'https://rss.materium.io'):
+        feed = f'{instance}/bilibili/user/dynamic/{BILIBILI_UID}'
+        try:
+            return parse_bilibili_rss(get_html(feed))
+        except (requests.RequestException, ValueError, ET.ParseError) as exc:
+            failures.append(f'{instance}: {exc}')
+            LOG.warning('Bilibili RSS mirror unavailable: %s', failures[-1])
+    raise RuntimeError('Bilibili API and RSS fallback unavailable; ' + '; '.join(failures))
 
 
 def unique_posts(posts: list[Post]) -> list[Post]:
@@ -390,6 +438,8 @@ def main(argv: list[str] | None = None) -> int:
             # Direct API and fallback mirror use different IDs; seed each independently
             # so switching providers never creates a flood of stale notifications.
             key = ('weibo-sina' if posts[0].id.startswith('sina:') else 'weibo-api') if name == 'weibo' else name
+            if name == 'bilibili' and posts[0].id.startswith('bili-rss:'):
+                key = 'bilibili-rss'
             notifications, new_count = process_source(key, posts, state, webhook, args.dry_run)
             LOG.info('%s: inspected %s posts, %s new, %s sent',
                      key, len(posts), new_count, notifications)

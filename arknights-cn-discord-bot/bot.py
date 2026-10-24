@@ -43,6 +43,7 @@ class Post:
     text: str
     url: str
     image: str | None = None
+    images: tuple[str, ...] = ()
 
 
 def clean_text(value: str) -> str:
@@ -127,12 +128,40 @@ def parse_weibo_api(data: dict) -> list[Post]:
     return unique_posts(posts)
 
 
-def parse_sina_page(raw: str) -> list[Post]:
-    """Sina publicly republishes the official account's Weibo posts.
+def remove_sina_metadata(text: str) -> str:
+    """Remove Sina's repost header and engagement numbers, not post content."""
+    text = re.sub(r'^\s*明日方舟\s*Arknights\s*20\d{2}-\d{2}-\d{2}\s*\d{2}:\d{2}\s*来自\s*', '', text, flags=re.I)
+    # After the date, Sina often inserts the publishing client before the actual post.
+    text = re.sub(r'^(?:微博直播平台|微博网页(?:版)?|微博视频号|微博客户端|微博|iPhone客户端|Android客户端|超话)[\s:：]*', '', text)
+    text = re.sub(r'(?:(?:\s*[·•]\s*|\s+)\d{1,7}){3}\s*$', '', text)
+    return text.strip(' |\n')
 
-    Use source-specific detail links so the same post is recognized every run.
-    This is a fallback; links open the Sina copy instead of a direct Weibo post.
-    """
+
+def extract_image_urls(fragment: str, base: str, *, max_count: int = 4) -> tuple[str, ...]:
+    """Pick actual post media, ignoring profile pictures and small page furniture."""
+    soup = BeautifulSoup(fragment or '', 'html.parser')
+    urls = []
+    for tag in soup.select('img, meta[property="og:image"], meta[name="twitter:image"]'):
+        candidates = [tag.get(k) for k in ('data-original', 'data-src', 'data-lazy-src', 'src', 'content')]
+        if tag.get('srcset'):
+            candidates.append(tag['srcset'].split(',')[0].strip().split(' ')[0])
+        for candidate in candidates:
+            url = absolute_image(base, candidate)
+            if not url:
+                continue
+            bad = ('/avatar/', '/face/', 'portrait', '/emoji/', 'favicon', 'spacer', 'placeholder', 'default_avatar', '/logo/', 'tvax', 'tva1.sinaimg')
+            if any(part in url.lower() for part in bad) or len(url) > 1900:
+                continue
+            if url not in urls:
+                urls.append(url)
+            break
+        if len(urls) >= max_count:
+            break
+    return tuple(urls)
+
+
+def parse_sina_page(raw: str) -> list[Post]:
+    """Get news items from Sina's public mirror with possible post thumbnails."""
     soup = BeautifulSoup(raw, 'html.parser')
     posts = []
     for anchor in soup.find_all('a', href=True):
@@ -140,15 +169,12 @@ def parse_sina_page(raw: str) -> list[Post]:
         match = re.fullmatch(r'https?://(?:www\.)?sina\.cn/news/detail/(\d+)\.html(?:\?.*)?', url)
         if not match:
             continue
-        content = clean_text(anchor.get_text(' ', strip=True))
-        # Remove the publisher/date/"posted from" prefix, not the news itself.
-        content = re.sub(r'^明日方舟Arknights\s+20\d\d-\d\d-\d\d\s+\d\d:\d\d来自\s*[^#]*', '', content)
-        content = content.strip()
+        content = remove_sina_metadata(clean_text(anchor.get_text(' ', strip=True)))
         if len(content) < 8:
             continue
-        first_img = anchor.find('img', src=True)
-        picture = absolute_image(url, first_img['src']) if first_img else None
-        posts.append(Post('Official Weibo (Sina mirror)', f'sina:{match.group(1)}', content, url, picture))
+        imgs = extract_image_urls(str(anchor), url)
+        posts.append(Post('Official Weibo (Sina mirror)', f'sina:{match.group(1)}', content,
+                          url, imgs[0] if imgs else None, imgs))
     if not posts:
         raise ValueError('Sina mirror had no matching /news/detail/ links')
     return unique_posts(posts)
@@ -192,19 +218,20 @@ def parse_bilibili_api(data: dict) -> list[Post]:
                  (opus.get('cover') or {}).get('url'))
         bvid = archive.get('bvid')
         url = f'https://www.bilibili.com/video/{bvid}' if bvid else f'https://www.bilibili.com/opus/{id_str}'
+        image_list = [absolute_image('https://www.bilibili.com/', image)] if image else []
+        for pic in pictures[:4]:
+            candidate = absolute_image('https://www.bilibili.com/', pic.get('src') or pic.get('url'))
+            if candidate and candidate not in image_list:
+                image_list.append(candidate)
         posts.append(Post('Official Bilibili', f'bilibili:{id_str}', text, url,
-                          absolute_image('https://www.bilibili.com/', image)))
+                          image_list[0] if image_list else None, tuple(image_list[:4])))
     if not posts:
         raise ValueError('Bilibili response had no usable dynamics')
     return unique_posts(posts)
 
 
 def parse_bilibili_rss(raw: str) -> list[Post]:
-    """Read an RSSHub feed for the official Bilibili account.
-
-    This is an independently hosted, best-effort fallback, not an official API.
-    Accept links pointing to Bilibili only, and reject empty/error feeds.
-    """
+    """Parse official-account items syndicated by a third-party RSSHub instance."""
     root = ET.fromstring(raw)
     posts = []
     for item in root.findall('.//item'):
@@ -212,22 +239,29 @@ def parse_bilibili_rss(raw: str) -> list[Post]:
         description = item.findtext('description') or ''
         encoded = item.findtext('{http://purl.org/rss/1.0/modules/content/}encoded') or ''
         body = encoded or description
-        text = clean_text(title + ' | ' + body)
+        body_text = clean_text(body)
+        # RSSHub often duplicates the entire title as the beginning of the body.
+        if title and body_text.startswith(title):
+            body_text = body_text[len(title):].lstrip(' |:：-')
+        text = (title + (' — ' + body_text if body_text else '')) if title else body_text
         link = (item.findtext('link') or '').strip()
         parsed = urlparse(link)
-        if parsed.scheme != 'https' or not (parsed.hostname or '').endswith(('.bilibili.com', '.b23.tv')):
+        hostname = parsed.hostname or ''
+        if parsed.scheme != 'https' or not (hostname == 'b23.tv' or hostname == 'bilibili.com' or hostname.endswith('.bilibili.com')):
             continue
         raw_id = (item.findtext('guid') or link).strip()
         if not raw_id or not text:
             continue
-        image = None
-        document = BeautifulSoup(body, 'html.parser')
-        first = document.find('img')
-        if first:
-            image = absolute_image(link, first.get('src') or first.get('data-src'))
-        # Links/IDs remain the same even if a different RSSHub instance is used.
+        imgs = list(extract_image_urls(body, link))
+        for element in item.iter():
+            if element.tag.split('}')[-1] not in ('enclosure', 'thumbnail', 'content'):
+                continue
+            url = absolute_image(link, element.attrib.get('url'))
+            mime = element.attrib.get('type', '')
+            if url and (mime.startswith('image/') or element.tag.split('}')[-1] == 'thumbnail' or re.search(r'\.(?:jpe?g|png|webp|gif)(?:[?@]|$)', url, re.I)) and url not in imgs:
+                imgs.append(url)
         posts.append(Post('Official Bilibili (RSS mirror)', f'bili-rss:{raw_id}',
-                          shorten(text, 1800), link, image))
+                          shorten(text, 1700), link, imgs[0] if imgs else None, tuple(imgs[:4])))
     if not posts:
         raise ValueError('RSS mirror returned no usable Bilibili posts')
     return unique_posts(posts)
@@ -263,75 +297,217 @@ def unique_posts(posts: list[Post]) -> list[Post]:
     return result
 
 
+def source_images(post: Post, *, max_count: int = 3) -> list[str]:
+    """Collect image URLs only for newly sent posts (not every old monitored post)."""
+    result = []
+    for url in ([post.image] if post.image else []) + list(post.images):
+        if url and url not in result:
+            result.append(url)
+    if post.source in ('Official site', 'Official Weibo (Sina mirror)'):
+        try:
+            raw = get_html(post.url)
+            soup = BeautifulSoup(raw, 'html.parser')
+            # Prefer in-article images over preview icons and page-wide banners.
+            article = soup.select_one('article, main, .news-detail, .news-content, .article, .article-content, .content')
+            if article:
+                for url in extract_image_urls(str(article), post.url):
+                    if url not in result:
+                        result.append(url)
+            if not result:
+                for meta in soup.select('meta[property="og:image"], meta[name="twitter:image"]'):
+                    for url in extract_image_urls(str(meta), post.url):
+                        if url not in result:
+                            result.append(url)
+        except requests.RequestException as exc:
+            LOG.warning('Could not find article images: %s', exc)
+    return result[:max_count]
+
+
 def enrich_image(post: Post) -> str | None:
-    if post.image:
-        return post.image
-    if post.source not in ('Official site', 'Official Weibo (Sina mirror)'):
-        return None
-    try:
-        soup = BeautifulSoup(get_html(post.url), 'html.parser')
-        meta = soup.find('meta', attrs={'property': 'og:image'}) or soup.find('meta', attrs={'name': 'twitter:image'})
-        if meta and meta.get('content'):
-            return absolute_image(post.url, meta['content'])
-        # Only try images inside the actual article; don't attach navigation assets.
-        article = soup.select_one('article, main, .news-detail, .news-content, .article, .article-content')
-        if article:
-            for img in article.find_all('img'):
-                url = img.get('src') or img.get('data-src')
-                if url and ('hycdn' in url or 'sinaimg' in url or '/news/' in url):
-                    return absolute_image(post.url, url)
-    except requests.RequestException as exc:
-        LOG.warning('Could not load article image: %s', exc)
-    return None
-
-
-def translated(text: str) -> str | None:
-    """Free, unofficial Google Translate web integration. May be rate-limited."""
-    try:
-        from deep_translator import GoogleTranslator
-        return GoogleTranslator(source='auto', target='en').translate(text[:1900])
-    except Exception as exc:
-        LOG.warning('English translation failed (sending Chinese original): %s', exc)
-        return None
+    """Backward-compatible helper for existing local scripts/tests."""
+    imgs = source_images(post, max_count=1)
+    return imgs[0] if imgs else None
 
 
 def shorten(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit - 1].rstrip() + '…'
 
 
-def send_to_discord(webhook: str, post: Post, *, dry_run: bool = False) -> None:
-    english = translated(post.text) if not dry_run else None
-    title = shorten((english or post.text).split(' | ')[0], 220)
-    chinese = shorten(post.text, 690)
-    translated_text = shorten(english, 690) if english else '*English translation unavailable this run.*'
-    desc = f'**English (automatic translation)**\n{translated_text}\n\n**中文原文**\n{chinese}'
+def translated(text: str) -> str | None:
+    """Try free machine-translation services, with no subscription or API key."""
+    # Translate excerpts, not copied link lists. This keeps within free limits.
+    message = shorten(re.sub(r'https?://\S+', '', text).strip(), 900)
+    if not message:
+        return None
+    if not re.search(r'[\u3400-\u9fff]', message):
+        return message
+    errors = []
+    try:
+        response = SESSION.get('https://translate.googleapis.com/translate_a/single',
+                               params={'client': 'gtx', 'sl': 'zh-CN', 'tl': 'en', 'dt': 't', 'q': message},
+                               timeout=(6, 12))
+        response.raise_for_status()
+        result = response.json()
+        english = ''.join(str(part[0]) for part in result[0] if part and part[0]).strip()
+        if english and english != message:
+            return english
+        raise ValueError('Empty translation')
+    except (requests.RequestException, ValueError, IndexError, TypeError, KeyError) as exc:
+        errors.append('Google endpoint: ' + str(exc))
+    try:
+        from deep_translator import GoogleTranslator
+        result = GoogleTranslator(source='zh-CN', target='en').translate(message)
+        if result and result != message:
+            return str(result)
+        raise ValueError('Empty translation')
+    except Exception as exc:
+        errors.append('Google HTML: ' + str(exc))
+    # MyMemory's free anonymous API has a 500-byte request cap and a daily quota.
+    # Keep this short enough for Chinese text and avoid paid keys or accounts.
+    try:
+        chunk = shorten(message, 130)
+        while len(chunk.encode('utf-8')) > 450:
+            chunk = chunk[:-1]
+        response = SESSION.get('https://api.mymemory.translated.net/get',
+                               params={'q': chunk, 'langpair': 'zh-CN|en'}, timeout=(6, 12))
+        response.raise_for_status()
+        data = response.json()
+        if int(data.get('responseStatus', 0)) != 200:
+            raise ValueError('Translation provider returned non-200 status')
+        result = html.unescape(str(data.get('responseData', {}).get('translatedText') or ''))
+        if result and result != chunk and not result.startswith('MYMEMORY WARNING'):
+            return result + (' …' if len(chunk) < len(message) else '')
+        raise ValueError('Empty translation')
+    except (requests.RequestException, ValueError, TypeError, KeyError) as exc:
+        errors.append('MyMemory: ' + str(exc))
+    LOG.warning('English translation unavailable: %s', ' | '.join(errors))
+    return None
+
+
+def category(text: str) -> tuple[str, int]:
+    """Heuristic label, not a claim about the content's official category."""
+    rules = (
+        (r'模组|module', 'Module update', 0x8C77DD),
+        (r'时装|皮肤|服饰|skin|outfit', 'New outfit / skin', 0xF498C2),
+        (r'干员|角色|技能|operator', 'Operator news', 0xE5B65C),
+        (r'维护|停机|闪断|服务器|更新公告|maintenance', 'Maintenance notice', 0xE78B55),
+        (r'直播|特别节目|前瞻|PV|预告片|livestream', 'Livestream / trailer', 0xAE82D6),
+        (r'活动|限时|复刻|主题曲|event', 'Event announcement', 0x46AFC4),
+    )
+    for pattern, label, color in rules:
+        if re.search(pattern, text, re.I):
+            return label, color
+    return 'Official announcement', 0x36B5C5
+
+
+def tidy_post_text(text: str) -> str:
+    text = remove_sina_metadata(text)
+    text = re.sub(r'https?://\S+', '', text)
+    text = re.sub(r'#明日方舟\[超话\]#|#明日方舟超话#|#明日方舟#', '', text)
+    return re.sub(r'\s+', ' ', text).strip(' |—–-')
+
+
+def build_embed(post: Post, english: str | None, *, preview: bool = False) -> dict:
+    category_name, color = category(post.text)
+    text = tidy_post_text(post.text)
+    # The English text belongs front and center; the Chinese is retained in a compact spoiler.
+    if english:
+        english_clean = tidy_post_text(english)
+        first_line = english_clean.split(' — ')[0].split(' | ')[0]
+        first_sentence = re.split(r'(?<=[.!?])\s+', first_line, maxsplit=1)[0]
+        title = shorten(first_sentence, 92)
+        if len(title) < 5:
+            title = category_name
+        body = shorten(english_clean, 1250)
+    else:
+        title = category_name
+        body = 'Free automatic translation is temporarily unavailable. See the Chinese original below.'
+    title = ('🧪 Preview • ' if preview else '') + title
     embed = {
-        'title': title,
+        'author': {'name': f'Arknights CN  •  {category_name}'},
+        'title': shorten(title, 220),
         'url': post.url,
-        'description': desc,
-        'color': 0x36B5C5,
-        'footer': {'text': post.source + ' • Arknights CN'},
+        'description': '**English translation**\n' + body + '\n\n[🔗 Open original announcement](' + post.url + ')',
+        'color': color,
+        'fields': [
+            {'name': '中文原文  •  Click to reveal',
+             'value': '||' + shorten(text or post.text, 800).replace('||', ' ') + '||', 'inline': False},
+        ],
+        'footer': {'text': post.source + '  •  Automatic translation may contain errors'},
     }
-    image = enrich_image(post) if not dry_run else post.image
-    if image:
-        embed['image'] = {'url': image}
-    payload = {
-        'username': 'Arknights CN News',
-        'allowed_mentions': {'parse': []},
-        'embeds': [embed],
-    }
+    return embed
+
+
+def try_download_image(url: str, *, referer: str) -> tuple[bytes, str] | None:
+    """Attach actual image bytes so Discord isn't dependent on image hotlink permission."""
+    try:
+        host = urlparse(url).hostname or ''
+        if urlparse(url).scheme not in ('https', 'http') or not host:
+            return None
+        if host in ('localhost', '127.0.0.1') or host.startswith(('127.', '10.', '192.168.', '169.254.')):
+            return None
+        with SESSION.get(url, headers={'Referer': referer}, timeout=(7, 18), stream=True) as response:
+            response.raise_for_status()
+            kind = response.headers.get('Content-Type', '').split(';')[0].lower()
+            ext = {'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif'}.get(kind)
+            if not ext:
+                return None
+            output = bytearray()
+            for block in response.iter_content(65536):
+                output.extend(block)
+                if len(output) > 4_500_000:
+                    return None
+            if not output:
+                return None
+            return bytes(output), ext
+    except requests.RequestException as exc:
+        LOG.info('Image download unavailable; trying image link instead: %s', exc)
+        return None
+
+
+def send_to_discord(webhook: str, post: Post, *, dry_run: bool = False, preview: bool = False) -> None:
+    english = translated(tidy_post_text(post.text)) if not dry_run else None
+    embed = build_embed(post, english, preview=preview)
+    payload = {'username': 'Arknights CN News', 'allowed_mentions': {'parse': []}, 'embeds': [embed]}
     if dry_run:
         LOG.info('[DRY RUN] %s - %s', post.source, shorten(post.text, 100))
         return
-    send_payload(webhook, payload)
+    images = source_images(post)
+    files = []
+    for url in images:
+        if len(files) >= 3:
+            break
+        img = try_download_image(url, referer=post.url)
+        if img:
+            data, ext = img
+            if sum(len(f[1]) for f in files) + len(data) > 9_000_000:
+                continue
+            filename = f'arknights_{len(files) + 1}.{ext}'
+            files.append((filename, data, 'image/jpeg' if ext == 'jpg' else f'image/{ext}'))
+    if files:
+        embed['image'] = {'url': 'attachment://' + files[0][0]}
+        for filename, _, _ in files[1:]:
+            payload['embeds'].append({'image': {'url': 'attachment://' + filename}, 'color': embed['color']})
+    elif images:
+        # Some hosts allow Discord to fetch the image directly, even when our download fails.
+        embed['image'] = {'url': images[0]}
+    else:
+        LOG.info('No suitable attached image on %s; text-only post', post.source)
+    send_payload(webhook, payload, files=files)
 
 
-def send_payload(webhook: str, payload: dict) -> None:
+def send_payload(webhook: str, payload: dict, *, files: list[tuple[str, bytes, str]] | None = None) -> None:
     if not webhook.startswith(('https://discord.com/api/webhooks/',
                                'https://discordapp.com/api/webhooks/')):
         raise ValueError('Webhook URL must be a Discord incoming-webhook URL')
     for attempt in range(3):
-        response = SESSION.post(webhook, json=payload, timeout=(10, 20))
+        if files:
+            upload = {f'files[{i}]': (filename, data, mime) for i, (filename, data, mime) in enumerate(files)}
+            response = SESSION.post(webhook,
+                                    data={'payload_json': json.dumps(payload, ensure_ascii=False)},
+                                    files=upload, timeout=(10, 40))
+        else:
+            response = SESSION.post(webhook, json=payload, timeout=(10, 20))
         if response.status_code in (200, 204):
             return
         if response.status_code == 429 and attempt < 2:
@@ -347,19 +523,26 @@ def send_payload(webhook: str, payload: dict) -> None:
 
 
 def send_test_message(webhook: str) -> None:
+    """Show a real, formatted news preview without changing saved post IDs."""
+    try:
+        latest = fetch_official()
+        send_to_discord(webhook, latest[0], preview=True)
+        LOG.info('Sent latest official article as a preview; state.json unchanged')
+        return
+    except Exception as exc:
+        LOG.warning('Could not generate live preview (%s); sending connection test', exc)
     send_payload(webhook, {
         'username': 'Arknights CN News',
         'allowed_mentions': {'parse': []},
         'embeds': [{
             'title': '✅ Arknights CN news bot connected!',
-            'description': 'Discord notifications are working. Run the normal workflow '
-                           'once to establish your starting point. New announcements '
-                           'will be sent on later checks.',
+            'description': 'Discord is working. Live article preview was unavailable; '
+                           'normal news monitoring remains enabled.',
             'color': 0x36B5C5,
             'url': SITE,
         }],
     })
-    LOG.info('Sent a test message to Discord')
+    LOG.info('Sent a Discord connection test')
 
 
 def load_state(path: Path) -> dict:

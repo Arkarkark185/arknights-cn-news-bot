@@ -13,6 +13,7 @@
     "weibo-sina": [
       "sina:5357642605922738",
       "sina:5357630026942504",
+      "sina:5357952148178190",
       "sina:5357937050521841",
       "sina:5357921949190619",
       "sina:5357903751938434",
@@ -135,6 +136,8 @@
       "sina:5337582931804642"
     ],
     "bilibili-rss": [
+      "bili-rss:https://t.bilibili.com/1263065702599753735",
+      "bili-rss:https://t.bilibili.com/1263050240691273735",
       "bili-rss:https://t.bilibili.com/1263034778822639633",
       "bili-rss:https://t.bilibili.com/1263011712707067908",
       "bili-rss:https://t.bilibili.com/1262988403899629665",
@@ -145,9 +148,9 @@
       "bili-rss:https://t.bilibili.com/1262760330422911015",
       "bili-rss:https://t.bilibili.com/1262759041940062265",
       "bili-rss:https://t.bilibili.com/1262756492878020614",
+      "bili-rss:https://t.bilibili.com/1262748733974511623",
       "bili-rss:https://t.bilibili.com/1262755440566992920",
       "bili-rss:https://t.bilibili.com/1262752599433543683",
-      "bili-rss:https://t.bilibili.com/1262748733974511623",
       "bili-rss:https://t.bilibili.com/1262751502120779840",
       "bili-rss:https://t.bilibili.com/1262750024605892643",
       "bili-rss:https://t.bilibili.com/1262741003070078977",

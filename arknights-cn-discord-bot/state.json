@@ -1,6 +1,7 @@
 {
   "sources": {
     "official": [
+      "site:5197",
       "site:0786",
       "site:4915",
       "site:7352",
@@ -17,6 +18,7 @@
     "weibo-sina": [
       "sina:5357642605922738",
       "sina:5357630026942504",
+      "sina:5363036904489364",
       "sina:5363021834881181",
       "sina:5363010475919590",
       "sina:5362934978445687",
@@ -182,6 +184,8 @@
       "sina:5337582931804642"
     ],
     "bilibili-rss": [
+      "bili-rss:https://t.bilibili.com/1268272680416575492",
+      "bili-rss:https://t.bilibili.com/1268257040293167124",
       "bili-rss:https://t.bilibili.com/1268245433120980999",
       "bili-rss:https://t.bilibili.com/1268168123726430211",
       "bili-rss:https://t.bilibili.com/1267858886073778184",

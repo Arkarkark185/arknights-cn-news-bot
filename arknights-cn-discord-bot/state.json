@@ -1,6 +1,7 @@
 {
   "sources": {
     "official": [
+      "site:2808",
       "site:6230",
       "site:5197",
       "site:0786",
@@ -19,6 +20,7 @@
     "weibo-sina": [
       "sina:5357642605922738",
       "sina:5357630026942504",
+      "sina:5366287070136288",
       "sina:5365834085565027",
       "sina:5365570375780532",
       "sina:5364822414723593",
@@ -191,6 +193,7 @@
       "sina:5337582931804642"
     ],
     "bilibili-rss": [
+      "bili-rss:https://t.bilibili.com/1271600661571567635",
       "bili-rss:https://t.bilibili.com/1271136805136105497",
       "bili-rss:https://t.bilibili.com/1270796658725093378",
       "bili-rss:https://t.bilibili.com/1270100859004387365",

@@ -1,6 +1,7 @@
 {
   "sources": {
     "official": [
+      "site:3029",
       "site:2808",
       "site:6230",
       "site:5197",
@@ -195,6 +196,8 @@
       "sina:5337582931804642"
     ],
     "bilibili-rss": [
+      "bili-rss:https://t.bilibili.com/1271956284886745094",
+      "bili-rss:https://t.bilibili.com/1271940823012868096",
       "bili-rss:https://t.bilibili.com/1271600661571567635",
       "bili-rss:https://t.bilibili.com/1271136805136105497",
       "bili-rss:https://t.bilibili.com/1270796658725093378",

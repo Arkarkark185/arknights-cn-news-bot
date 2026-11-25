@@ -21,6 +21,7 @@
     "weibo-sina": [
       "sina:5357642605922738",
       "sina:5357630026942504",
+      "sina:5369239255916092",
       "sina:5369186168608422",
       "sina:5368816777302784",
       "sina:5367751717424065",
@@ -199,6 +200,7 @@
       "sina:5337582931804642"
     ],
     "bilibili-rss": [
+      "bili-rss:https://t.bilibili.com/1274624080207675394",
       "bili-rss:https://t.bilibili.com/1274569343004311559",
       "bili-rss:https://t.bilibili.com/1274507514790019080",
       "bili-rss:https://t.bilibili.com/1274136425281880082",
